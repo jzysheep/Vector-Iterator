@@ -1,19 +1,36 @@
-//
-// Created by Ziyang Jiang on 1/31/16.
-//
-// Vector.h -- header file for Vector data structure project
-
-#pragma once
-
-#ifndef _Vector_h
-#define _Vector_h
+#ifndef _VECTOR_H_
+#define _VECTOR_H_
 
 #include <cstdint>
-#include <iterator>
 #include <stdexcept>
 #include <utility>
 
-namespace epl {
+//Utility gives std::rel_ops which will fill in relational
+//iterator operations so long as you provide the
+//operators discussed in class.  In any case, ensure that
+//all operations listed in this website are legal for your
+//iterators:
+//http://www.cplusplus.com/reference/iterator/RandomAccessIterator/
+using namespace std::rel_ops;
+
+namespace epl{
+    
+    class invalid_iterator {
+    public:
+        enum SeverityLevel {SEVERE,MODERATE,MILD,WARNING};
+        SeverityLevel level;
+        
+        invalid_iterator(SeverityLevel level = SEVERE){ this->level = level; }
+        virtual const char* what() const {
+            switch(level){
+                case WARNING:   return "Warning"; // not used in Spring 2015
+                case MILD:      return "Mild";
+                case MODERATE:  return "Moderate";
+                case SEVERE:    return "Severe";
+                default:        return "ERROR"; // should not be used
+            }
+        }
+    };
     
     template <typename T>
     class vector {
@@ -23,6 +40,9 @@ namespace epl {
         T* cap_finish;
         T* data_start;
         T* data_end;
+        
+        size_t version = 0;
+        size_t resize_version = 0;
         
         const uint64_t minimum_capacity = 8;
     public:
@@ -90,6 +110,8 @@ namespace epl {
             if (this != &rhs) {
                 destroy();
                 copy(rhs);
+                ++resize_version;
+                ++version;
             }
             return *this;
         }
@@ -97,6 +119,8 @@ namespace epl {
         vector<T>& operator=(vector<T>&& rhs) {
             destroy();
             move(std::move(rhs));
+            ++version;
+            ++resize_version;
             return *this;
         }
         
@@ -121,48 +145,59 @@ namespace epl {
             check_back(1);
             new (data_end) T(std::move(temp));
             ++data_end;
+            ++version;
+            
         }
         
         void push_back(T&& that) {
-            //            T temp(std::move(that));
+            T temp(std::move(that));
             check_back(1);
-            //            new (data_end) T(std::move(temp));
-            new (data_end) T(std::move(that));
+            new (data_end) T(std::move(temp));
+            //            new (data_end) T(std::move(that));
             ++data_end;
+            ++version;
         }
         
         template <typename... Args>
-        void emplace_back(Args... args) {
+        void emplace_back(Args&&... args) {
             check_back(1);
-            new(data_end) T(args...);
+            new(data_end) T(std::forward<Args>(args)...);
+            ++version;
         }
         
         void push_front(const T& that) {
+            T temp(that);
             check_front(1);
             --data_start;
-            new (data_start) T(that);
+            new (data_start) T(std::move(temp));
+            ++version;
         }
         
         void push_front(T&& that) {
+            T temp(std::move(that));
             check_front(1);
             --data_start;
-            new (data_start) T(std::move(that));
+            new (data_start) T(std::move(temp));
+            ++version;
         }
         
         template <typename... Args>
-        void emplace_front(Args... args) {
+        void emplace_front(Args&&... args) {
             check_front(1);
             --data_start;
-            new (data_start) T(args...);
+            new (data_start) T(std::forward<Args>(args)...);
+            ++version;
         }
         
         void pop_back(void) {
+            ++version;
             if (data_start == data_end) { throw std::out_of_range("empty vector, nothing to pop back"); }
             --data_end;
             data_end->~T();
         }
         
         void pop_front(void) {
+            ++version;
             if (data_start == data_end) { throw std::out_of_range("empty vector, nothing to pop front"); }
             data_start->~T();
             ++data_start;
@@ -190,56 +225,99 @@ namespace epl {
         
         class iterator;
         class const_iterator : public std::iterator<std::random_access_iterator_tag, T> {
-            const vector<T>* parent;
-            uint64_t index;
-            const T* ptr;
+            const vector<T>* obj;
+            
+            uint64_t version;
+            uint64_t resize_version;
+            uint64_t index; // change from pointer to index for the convinience of comparison
+            bool valid;
+            
+            //        using Same = const_iterator;
             
         public:
-            const_iterator(void) {
+            const_iterator(void) { // no use
+                obj = nullptr;
+                version = 0;
+                resize_version = 0;
                 index = 0;
-                ptr = nullptr;
-                parent = nullptr;
+                valid = true;
             }
             
+            const_iterator(const vector<T>* obj, size_t version, size_t resize_version, uint64_t index) {
+                this->obj = obj;
+                this->version = version;
+                this->resize_version = resize_version;
+                this->index = index;
+                this->valid = (index >=0 && index < obj->size());
+            }
+            
+            const_iterator(const const_iterator& that) : obj(that.obj), version(that.version), resize_version(that.resize_version), index(that.index), valid(that.valid) {};
+            
+            const_iterator operator=(const const_iterator& that) {
+                obj = that.obj;
+                version = that.version;
+                resize_version = that.resize_version;
+                index = that.index;
+                valid = that.valid;
+                return *this;
+            }
+            
+            
+            
             const T& operator*(void) const {
-                return *ptr;
+                validate(this);
+                return *(obj->data_start + index);
             }
             
             const_iterator& operator++(void) {
-                ++ptr;
+                validate(this);
                 ++index;
+                valid = (index >= 0 && index < obj->size());
                 return *this;
             }
             
             const_iterator operator++(int) {
-                const_iterator t(*this);
+                const_iterator tmp(*this);
                 this->operator++();
-                return t;
+                return tmp;
             }
             
             const_iterator& operator--(void) {
-                --ptr;
+                validate(this);
                 --index;
+                valid = (index >= 0 && index < obj->size());
                 return *this;
             }
             
             
             const_iterator operator--(int) {
-                const_iterator t(*this);
+                const_iterator tmp(*this);
                 this->operator--();
-                return t;
+                return tmp;
             }
             
-            int64_t operator-(const const_iterator that) const {
-                return this->ptr - that.ptr;
+            int64_t operator-(const const_iterator& that) const {
+                validate(this);
+                validate(&that);
+                return this->index - that.index;
             }
             
             const_iterator operator+(int64_t k) {
-                return iterator(parent, ptr + k);
+                validate(this);
+                index += k;
+                valid = (index >= 0 && index < obj->size());
+                return *this;
             }
             
-            bool operator==(const const_iterator& rhs) const {
-                return this->parent == rhs.parent && this->ptr == rhs.ptr;
+            
+            T& operator[](uint64_t k) { return *(obj->data_start + index + k); }
+            
+            
+            
+            bool operator==(const const_iterator& that) const {
+                validate(this);
+                validate(&that);
+                return this->index == that.index;
             }
             
             bool operator!=(const const_iterator& that) const {
@@ -249,18 +327,22 @@ namespace epl {
             friend vector<T>;
             friend vector<T>::iterator;
             
-        private:
-            const_iterator(const vector<T>* parent, const T* ptr) {
-                this->parent = parent;
-                this->ptr = ptr;
-                this->index = ptr - parent->data_start;
+            void validate(const const_iterator* iter) const {
+                if ((iter->version != iter->obj->version) || (iter->resize_version != iter->obj->resize_version)) {
+                    if (iter->valid && (iter->index < 0 || iter->index >= iter->obj->size()))
+                    {throw epl::invalid_iterator{ epl::invalid_iterator::SEVERE };}
+                    else if (iter->valid && (iter->resize_version != iter->obj->resize_version))
+                    {throw epl::invalid_iterator{ epl::invalid_iterator::MODERATE };}
+                    else
+                    { throw epl::invalid_iterator{ epl::invalid_iterator::MILD }; }
+                }
             }
+            
             
         };
         
         class iterator : public const_iterator {
-            //            using const_iterator = iterator;
-            //            using Base = const_iterator;
+            
         public:
             iterator(void) {}
             
@@ -269,23 +351,23 @@ namespace epl {
             }
             
             iterator operator+(int64_t k) {
-                //                const_iterator::operator+(k); //calls checkRevision for us
-                return iterator(const_iterator::parent, const_iterator::ptr + k);
+                const_iterator::operator+(k); //calls checkRevision for us
+                return iterator(const_iterator::obj, const_iterator::version, const_iterator::resize_version, const_iterator::index);
             }
-            const_iterator& operator++(void) { const_iterator::operator++(); return *this; }
-            const_iterator operator++(int) { const_iterator t(*this); operator++(); return t; }
-            const_iterator& operator--(void) { const_iterator::operator--(); return *this; }
-            const_iterator operator--(int) { const_iterator t(*this); operator--(); return t; }
+            iterator& operator++(void) { const_iterator::operator++(); return *this; }
+            iterator operator++(int) { iterator tmp(*this); operator++(); return tmp; }
+            iterator& operator--(void) { const_iterator::operator--(); return *this; }
+            iterator operator--(int) { iterator tmp(*this); operator--(); return tmp; }
         private:
             friend vector<T>;
-            iterator(const vector<T>* parent, const T* ptr) : const_iterator(parent, ptr) { }
+            iterator(const vector<T>* obj, size_t version, size_t resize_version, uint64_t index) : const_iterator(obj, version, resize_version, index) { }
         };
         
-        const_iterator begin(void) const { return const_iterator(this, data_start); }
-        iterator begin(void) { return iterator(this, data_start); }
+        const_iterator begin(void) const { return const_iterator(this, version, resize_version, 0); }
+        iterator begin(void) { return iterator(this, version, resize_version, 0); }
         
-        const_iterator end(void) const { return const_iterator(this, data_end); }
-        iterator end(void) { return iterator(this, data_end); }
+        const_iterator end(void) const { return const_iterator(this, version, resize_version, size()); }
+        iterator end(void) { return iterator(this, version, resize_version, size()); }
         
     private:
         void destroy(void) {
@@ -371,6 +453,8 @@ namespace epl {
             cap_finish = cap_start + capacity;
             data_start = new_data;
             data_end = new_data_end;
+            
+            ++resize_version;
         }
         
         void check_front(uint64_t front_capacity) {
@@ -403,10 +487,13 @@ namespace epl {
             cap_finish = cap_start + capacity;
             data_start = new_data;
             data_end = new_data_end;
+            
+            ++resize_version;
         }
         
     };
     
-}
+    
+} //namespace epl
 
 #endif
